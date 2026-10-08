@@ -9,12 +9,21 @@
 #define SLEEP_TIME 120
 #define MEASUREMENT_FILE "/measurements.bin"
 
+struct Measurement {
+    float temperature;
+    float humidity;
+    uint16_t eco2;
+    uint16_t tvoc;
+    uint32_t id;
+};
+
 Adafruit_AHTX0 aht;
 ScioSense_ENS160 ens160(ENS160_I2CADDR_0);
 
 
 void setup() {
     initializeSystem();
+    Serial.println(sizeof(Measurement));
 }
 
 void loop() {
@@ -185,7 +194,92 @@ void initializeSensors() {
     }else{
         Serial.println("ERRO em configurar ENS160 em modo padrao!");
     }
+}
+
+Measurement performMeasurement(){
+    Measurement measurement;
+
+    sensors_event_t humidity, temp;
+    aht.getEvent(&humidity, &temp);
+
+    measurement.temperature = temp.temperature;
+    measurement.humidity = humidity.relative_humidity;
+    ens160.set_envdata(measurement.temperature, measurement.humidity);
 
     //valido colocar um delay de 3 minutos para a estabilizacao do ens160, mas para teste sera colocado um delay de 10 segundos
     delay(10000);
+    ens160.measure(true);
+    measurement.eco2 = ens160.geteCO2();
+    measurement.tvoc = ens160.getTVOC();
+    return measurement;
+}
+
+bool saveMeasurementToFile(Measurement measurement){
+    if(!LittleFS.exists(MEASUREMENT_FILE)) {
+        Serial.println("ERRO: Arquivo de medidas nao existe!");
+        return false;
+    }
+
+    File measurementFile = LittleFS.open(MEASUREMENT_FILE, FILE_APPEND);
+    if (!measurementFile) {
+        Serial.println("ERRO: Nao foi possivel abrir o arquivo de medidas!");
+        return false;
+    }
+
+    measurement.id = getNextMeasurementId();
+
+    size_t bytesWritten = measurementFile.write(
+        (uint8_t*)&measurement,
+        sizeof(measurement)
+    );
+
+    measurementFile.close();
+
+    if (bytesWritten != sizeof(measurement)) {
+        Serial.println("ERRO: Nao foi possivel gravar a medida completa!");
+        return false;
+    }
+
+    Serial.println("Medida salva com sucesso!");
+    return true;
+}
+
+uint32_t getNextMeasurementId() {
+
+    File measurementFile = LittleFS.open(MEASUREMENT_FILE, FILE_READ);
+
+    if (!measurementFile) {
+        Serial.println("ERRO: nao foi possivel abrir o arquivo!");
+        return 0;
+    }
+
+    size_t fileSize = measurementFile.size();
+
+    // Arquivo possui apenas o timestamp inicial
+    if (fileSize == sizeof(uint64_t)) {
+        measurementFile.close();
+        return 0;
+    }
+
+    // Calcula onde começa o ultimo Measurement
+    size_t lastMeasurementPosition =
+        fileSize - sizeof(Measurement);
+
+    measurementFile.seek(lastMeasurementPosition);
+
+    Measurement lastMeasurement;
+
+    size_t bytesRead = measurementFile.read(
+        (uint8_t*)&lastMeasurement,
+        sizeof(Measurement)
+    );
+
+    measurementFile.close();
+
+    if (bytesRead != sizeof(Measurement)) {
+        Serial.println("ERRO: nao foi possivel ler o ultimo Measurement!");
+        return 0;
+    }
+
+    return lastMeasurement.id + 1;
 }
