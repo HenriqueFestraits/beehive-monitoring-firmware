@@ -14,8 +14,6 @@ ScioSense_ENS160 ens160(ENS160_I2CADDR_0);
 
 
 void setup() {
-
-    deleteMeasurementFile(); // Apaga o arquivo de medidas para teste    
     initializeSystem();
 }
 
@@ -24,11 +22,18 @@ void loop() {
 }
 
 
+
+
+
+
+
 void initializeSystem() {
     Serial.begin(115200);
     Wire.begin(SDA_PIN, SCL_PIN);
 
     initializeFS();
+
+    deleteMeasurementFile(); // Apaga o arquivo de medidas para teste    
 
     if(measurementFileExists()) {
         Serial.println("Measurement file exists.");
@@ -37,7 +42,13 @@ void initializeSystem() {
         Serial.println("Measurement file does not exist.");
         firstBootSetup();
     }
+
+    initializeSensors();
 }
+
+
+
+
 
 void initializeFS(){
     if(!LittleFS.begin(true)){
@@ -47,9 +58,16 @@ void initializeFS(){
     }
 }
 
+
+
+
+
 bool measurementFileExists() {
     return LittleFS.exists(MEASUREMENT_FILE);
 }
+
+
+
 
 void firstBootSetup(){
 
@@ -72,7 +90,21 @@ void firstBootSetup(){
 
 void normalBootSetup(){
 
+    esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
+
+    if(wakeupCause == ESP_SLEEP_WAKEUP_GPIO){
+        Serial.println("Wake-up causado pelo GPIO.");
+        //fluxo de comunicação com o dispositivo
+    }
+    else if(wakeupCause == ESP_SLEEP_WAKEUP_TIMER){
+        Serial.println("Wake-up causado pelo timer.");
+    }
+    else{
+        Serial.println("Wake-up causado motivo desconhecido.");
+    }
 }
+
+
 
 bool receiveInitialTimestamp(uint64_t &timestamp){
     Serial.println("Aguardando timestamp inicial do dispositivo...");
@@ -131,4 +163,29 @@ void deleteMeasurementFile() {
     } else {
         Serial.println("Arquivo de medidas nao existe.");
     }
+}
+
+
+void initializeSensors() {
+
+    if(!aht.begin()){
+        Serial.println("ERRO: AHT21 nao encontrado!");
+        while(1) delay(100);
+    }
+    Serial.println("AHT21 encontrado!");
+
+    if(ens160.begin() != 0){
+        Serial.println("Erro: ENS160 nao encontrado!");
+        while(1) delay(100);
+    }
+    Serial.println("ENS160 encontrado!");
+
+    if(ens160.setMode(ENS160_OPMODE_STD) == 0){
+        Serial.println("ENS160 em modo padrao");
+    }else{
+        Serial.println("ERRO em configurar ENS160 em modo padrao!");
+    }
+
+    //valido colocar um delay de 3 minutos para a estabilizacao do ens160, mas para teste sera colocado um delay de 10 segundos
+    delay(10000);
 }
