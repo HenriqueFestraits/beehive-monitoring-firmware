@@ -14,6 +14,8 @@ ScioSense_ENS160 ens160(ENS160_I2CADDR_0);
 
 
 void setup() {
+
+    deleteMeasurementFile(); // Apaga o arquivo de medidas para teste    
     initializeSystem();
 }
 
@@ -65,6 +67,7 @@ void firstBootSetup(){
     if (!saveInitialTimestamp(initialTimestamp)) {
         Serial.println("ERRO: Falha ao salvar o timestamp inicial!");
         return;
+    }
 }
 
 void normalBootSetup(){
@@ -116,4 +119,16 @@ bool saveInitialTimestamp(uint64_t timestamp) {
     Serial.println("Timestamp inicial salvo com sucesso!");
 
     return true;
+}
+
+void deleteMeasurementFile() {
+    if (LittleFS.exists(MEASUREMENT_FILE)) {
+        if (LittleFS.remove(MEASUREMENT_FILE)) {
+            Serial.println("Arquivo de medidas apagado com sucesso!");
+        } else {
+            Serial.println("ERRO: Nao foi possivel apagar o arquivo!");
+        }
+    } else {
+        Serial.println("Arquivo de medidas nao existe.");
+    }
 }
