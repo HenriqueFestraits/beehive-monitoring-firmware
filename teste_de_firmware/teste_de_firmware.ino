@@ -61,13 +61,10 @@ void firstBootSetup(){
     Serial.print("Timestamp inicial: ");
     Serial.println(initialTimestamp);
     //criar arquivo de medidas
-    File measurementFile = LittleFS.open(MEASUREMENT_FILE, FILE_WRITE);
-    if(!measurementFile){
-        Serial.println("ERRO: nao foi possivel criar o arquivo de medidas!");
-    }else{
-        Serial.println("Arquivo de medidas criado com sucesso!");
-        measurementFile.close();
-    }
+
+    if (!saveInitialTimestamp(initialTimestamp)) {
+        Serial.println("ERRO: Falha ao salvar o timestamp inicial!");
+        return;
 }
 
 void normalBootSetup(){
@@ -92,5 +89,31 @@ bool receiveInitialTimestamp(uint64_t &timestamp){
     timestamp = strtoull(receivedData.c_str(), nullptr, 10);
     Serial.print("Timestamp inicial recebido: ");
     Serial.println(timestamp);
+    return true;
+}
+
+bool saveInitialTimestamp(uint64_t timestamp) {
+
+    File measurementFile = LittleFS.open(MEASUREMENT_FILE, FILE_WRITE);
+
+    if (!measurementFile) {
+        Serial.println("ERRO: nao foi possivel abrir o arquivo de medidas!");
+        return false;
+    }
+
+    size_t bytesWritten = measurementFile.write(
+        (uint8_t*)&timestamp,
+        sizeof(timestamp)
+    );
+
+    measurementFile.close();
+
+    if (bytesWritten != sizeof(timestamp)) {
+        Serial.println("ERRO: nao foi possivel gravar o timestamp completo!");
+        return false;
+    }
+
+    Serial.println("Timestamp inicial salvo com sucesso!");
+
     return true;
 }
