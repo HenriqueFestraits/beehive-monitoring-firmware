@@ -6,7 +6,7 @@
 
 #define SDA_PIN 22
 #define SCL_PIN 23
-#define SLEEP_TIME 120
+#define SLEEP_TIME 10 // tempo de sono em segundos (10s para teste, 2h para produção)
 #define MEASUREMENT_FILE "/measurements.bin"
 
 struct Measurement {
@@ -23,11 +23,16 @@ ScioSense_ENS160 ens160(ENS160_I2CADDR_0);
 
 void setup() {
     initializeSystem();
+    Serial.print("Tamanho da struct Measurement: ");
     Serial.println(sizeof(Measurement));
 }
 
 void loop() {
 
+    saveMeasurementToFile(performMeasurement());
+    delay(3000);
+
+    enterDeepSleep();
 }
 
 
@@ -240,7 +245,9 @@ bool saveMeasurementToFile(Measurement measurement){
         return false;
     }
 
-    Serial.println("Medida salva com sucesso!");
+    Serial.print("Medida salva com ID: ");
+    Serial.println(measurement.id);
+
     return true;
 }
 
@@ -282,4 +289,10 @@ uint32_t getNextMeasurementId() {
     }
 
     return lastMeasurement.id + 1;
+}
+
+void enterDeepSleep(){
+    Serial.println("Entrando em modo de baixo consumo...");
+    esp_sleep_enable_timer_wakeup(SLEEP_TIME * 1000000ULL);
+    esp_deep_sleep_start();
 }
