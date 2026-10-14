@@ -363,3 +363,253 @@ void handleUsbCommunication(){
 void handleWakeupGPIO(){
     handleUsbCommunication();
 }
+
+
+// ============================================================================
+// Protocolo de transferencia USB Serial (V1)
+// Estas funcoes ficam isoladas e NAO sao chamadas pelo fluxo atual do firmware.
+// Para iniciar uma sessao explicitamente, chamar runFileTransferProtocol().
+// ============================================================================
+
+#define PROTOCOL_LINE_TIMEOUT 30000UL
+#define PROTOCOL_MAX_LINE_LENGTH 128
+#define TRANSFER_BUFFER_SIZE 256
+
+// Le uma linha de controle terminada em LF. Aceita CRLF e limita o tamanho.
+bool readProtocolLine(String &line, unsigned long timeoutMs) {
+    line = "";
+    unsigned long startTime = millis();
+
+    while (millis() - startTime < timeoutMs) {
+        while (Serial.available() > 0) {
+            char receivedChar = (char)Serial.read();
+
+            if (receivedChar == '\n') {
+                line.trim();
+                return line.length() > 0;
+            }
+
+            if (receivedChar != '\r') {
+                if (line.length() >= PROTOCOL_MAX_LINE_LENGTH) {
+                    Serial.println("ERROR:BAD_COMMAND");
+                    line = "";
+                    return false;
+                }
+                line += receivedChar;
+            }
+        }
+        delay(5);
+    }
+
+    return false;
+}
+
+// CRC-32/ISO-HDLC (CRC-32/IEEE): polynomial reflected 0xEDB88320.
+uint32_t calculateFileCrc32(File &file) {
+    uint32_t crc = 0xFFFFFFFFUL;
+    uint8_t buffer[TRANSFER_BUFFER_SIZE];
+
+    file.seek(0);
+
+    while (file.available()) {
+        size_t bytesRead = file.read(buffer, sizeof(buffer));
+        if (bytesRead == 0) {
+            break;
+        }
+
+        for (size_t i = 0; i < bytesRead; i++) {
+            crc ^= buffer[i];
+            for (uint8_t bit = 0; bit < 8; bit++) {
+                if (crc & 1U) {
+                    crc = (crc >> 1) ^ 0xEDB88320UL;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+    }
+
+    file.seek(0);
+    return crc ^ 0xFFFFFFFFUL;
+}
+
+// Aguarda HELLO e responde READY. Comandos desconhecidos recebem BAD_COMMAND.
+bool waitForProtocolHandshake() {
+    unsigned long startTime = millis();
+
+    while (millis() - startTime < USB_HANDSHAKE_TIMEOUT) {
+        String message;
+        unsigned long remaining = USB_HANDSHAKE_TIMEOUT - (millis() - startTime);
+
+        if (!readProtocolLine(message, remaining)) {
+            continue;
+        }
+
+        if (message == "HELLO") {
+            Serial.println("READY");
+            handshakeStabilished = true;
+            return true;
+        }
+
+        Serial.println("ERROR:BAD_COMMAND");
+    }
+
+    handshakeStabilished = false;
+    return false;
+}
+
+// Aguarda GET_FILE depois do handshake.
+bool waitForFileRequest() {
+    String message;
+
+    if (!readProtocolLine(message, PROTOCOL_LINE_TIMEOUT)) {
+        return false;
+    }
+
+    if (message == "GET_FILE") {
+        return true;
+    }
+
+    Serial.println("ERROR:BAD_COMMAND");
+    return false;
+}
+
+// Valida RECEIVED:<tamanho_em_bytes>:<crc32> enviado pelo aplicativo.
+bool validateTransferConfirmation(const String &message,
+                                 size_t expectedSize,
+                                 uint32_t expectedCrc32) {
+    if (message == "ERROR:CHECKSUM_MISMATCH") {
+        return false;
+    }
+
+    if (!message.startsWith("RECEIVED:")) {
+        Serial.println("ERROR:BAD_COMMAND");
+        return false;
+    }
+
+    int separator = message.indexOf(':', 9);
+    if (separator < 0) {
+        Serial.println("ERROR:BAD_COMMAND");
+        return false;
+    }
+
+    String sizeField = message.substring(9, separator);
+    String crcField = message.substring(separator + 1);
+    sizeField.trim();
+    crcField.trim();
+
+    if (sizeField.length() == 0 || crcField.length() == 0) {
+        Serial.println("ERROR:BAD_COMMAND");
+        return false;
+    }
+
+    char *endPointer = nullptr;
+    unsigned long receivedSize = strtoul(sizeField.c_str(), &endPointer, 10);
+    if (*endPointer != '\0' || receivedSize != expectedSize) {
+        return false;
+    }
+
+    endPointer = nullptr;
+    unsigned long receivedCrc = strtoul(crcField.c_str(), &endPointer, 16);
+    if (*endPointer != '\0' || receivedCrc != expectedCrc32) {
+        return false;
+    }
+
+    return true;
+}
+
+// Envia FILE_INFO e, em seguida, exatamente fileSize bytes binarios.
+// Nao escreve logs textuais enquanto os bytes do arquivo estao sendo enviados.
+bool transmitMeasurementFile(size_t &transmittedSize, uint32_t &transmittedCrc32) {
+    transmittedSize = 0;
+    transmittedCrc32 = 0;
+
+    if (!LittleFS.exists(MEASUREMENT_FILE)) {
+        Serial.println("ERROR:NO_FILE");
+        return false;
+    }
+
+    File measurementFile = LittleFS.open(MEASUREMENT_FILE, FILE_READ);
+    if (!measurementFile) {
+        Serial.println("ERROR:FILE_OPEN_FAILED");
+        return false;
+    }
+
+    const size_t fileSize = measurementFile.size();
+    const uint32_t fileCrc32 = calculateFileCrc32(measurementFile);
+
+    // Metadados textuais antes do fluxo binario.
+    Serial.printf("FILE_INFO:%lu:%08lX\n",
+                  (unsigned long)fileSize,
+                  (unsigned long)fileCrc32);
+    Serial.flush();
+
+    uint8_t buffer[TRANSFER_BUFFER_SIZE];
+    size_t totalSent = 0;
+
+    while (totalSent < fileSize) {
+        size_t remaining = fileSize - totalSent;
+        size_t bytesToRead = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+        size_t bytesRead = measurementFile.read(buffer, bytesToRead);
+
+        if (bytesRead == 0) {
+            measurementFile.close();
+            return false;
+        }
+
+        size_t offset = 0;
+        while (offset < bytesRead) {
+            size_t bytesWritten = Serial.write(buffer + offset, bytesRead - offset);
+            if (bytesWritten == 0) {
+                measurementFile.close();
+                return false;
+            }
+            offset += bytesWritten;
+            totalSent += bytesWritten;
+        }
+    }
+
+    measurementFile.close();
+    Serial.flush();
+
+    transmittedSize = totalSent;
+    transmittedCrc32 = fileCrc32;
+    return totalSent == fileSize;
+}
+
+// Aguarda a confirmacao do aplicativo e responde TRANSFER_OK somente se valida.
+bool waitForTransferConfirmation(size_t expectedSize, uint32_t expectedCrc32) {
+    String confirmation;
+
+    if (!readProtocolLine(confirmation, PROTOCOL_LINE_TIMEOUT)) {
+        return false;
+    }
+
+    if (!validateTransferConfirmation(confirmation, expectedSize, expectedCrc32)) {
+        return false;
+    }
+
+    Serial.println("TRANSFER_OK");
+    return true;
+}
+
+// Ponto de entrada do protocolo completo. Intencionalmente nao chamado por
+// setup(), loop(), normalBootSetup() ou handleWakeupGPIO() nesta etapa.
+bool runFileTransferProtocol() {
+    if (!waitForProtocolHandshake()) {
+        return false;
+    }
+
+    if (!waitForFileRequest()) {
+        return false;
+    }
+
+    size_t transmittedSize = 0;
+    uint32_t transmittedCrc32 = 0;
+
+    if (!transmitMeasurementFile(transmittedSize, transmittedCrc32)) {
+        return false;
+    }
+
+    return waitForTransferConfirmation(transmittedSize, transmittedCrc32);
+}
