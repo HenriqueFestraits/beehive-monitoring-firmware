@@ -585,7 +585,7 @@ bool parseTimestampResponse(const String &message, uint64_t &timestamp) {
     char *endPointer = nullptr;
     unsigned long long parsedTimestamp = strtoull(timestampField.c_str(), &endPointer, 10);
 
-    if (endPointer == timestampField.c_str() || *endPointer != '\\0' || parsedTimestamp == 0) {
+    if (endPointer == timestampField.c_str() || *endPointer != '\0' || parsedTimestamp == 0) {
         return false;
     }
 
