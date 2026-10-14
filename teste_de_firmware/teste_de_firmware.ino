@@ -8,6 +8,9 @@
 #define SCL_PIN 23
 #define SLEEP_TIME 10 // tempo de sono em segundos (10s para teste, 2h para produção)
 #define MEASUREMENT_FILE "/measurements.bin"
+#define USB_HANDSHAKE_TIMEOUT 30000
+
+bool handshakeStabilished = false;
 
 struct Measurement {
     float temperature;
@@ -19,6 +22,8 @@ struct Measurement {
 
 Adafruit_AHTX0 aht;
 ScioSense_ENS160 ens160(ENS160_I2CADDR_0);
+
+
 
 
 void setup() {
@@ -40,15 +45,16 @@ void loop() {
 
 
 
-
+//inicializa o sistema toda vez que o esp32 é bootado
 void initializeSystem() {
     Serial.begin(115200);
     Wire.begin(SDA_PIN, SCL_PIN);
 
     initializeFS();
 
-    deleteMeasurementFile(); // Apaga o arquivo de medidas para teste    
+    //deleteMeasurementFile(); // Apaga o arquivo de medidas para teste(remover no programa final)
 
+    //verificação para o primeiro boot
     if(measurementFileExists()) {
         Serial.println("Measurement file exists.");
         normalBootSetup();
@@ -63,7 +69,7 @@ void initializeSystem() {
 
 
 
-
+//inicializa o file system usado em todo o programa
 void initializeFS(){
     if(!LittleFS.begin(true)){
     Serial.println("ERRO: Falha ao iniciar LittleFS!");
@@ -74,15 +80,12 @@ void initializeFS(){
 
 
 
-
-
 bool measurementFileExists() {
     return LittleFS.exists(MEASUREMENT_FILE);
 }
 
 
-
-
+//ciclo do primeiro boot após upload do programa no esp32 formatado
 void firstBootSetup(){
 
     uint64_t initialTimestamp;
@@ -102,9 +105,12 @@ void firstBootSetup(){
     }
 }
 
+//ciclo dos demais boots para o esp32 funcionando normalmente
 void normalBootSetup(){
 
     esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
+    Serial.println("");
+    Serial.println("------------------");
 
     if(wakeupCause == ESP_SLEEP_WAKEUP_GPIO){
         Serial.println("Wake-up causado pelo GPIO.");
@@ -112,6 +118,7 @@ void normalBootSetup(){
     }
     else if(wakeupCause == ESP_SLEEP_WAKEUP_TIMER){
         Serial.println("Wake-up causado pelo timer.");
+        handleWakeupGPIO();
     }
     else{
         Serial.println("Wake-up causado motivo desconhecido.");
@@ -119,7 +126,7 @@ void normalBootSetup(){
 }
 
 
-
+// recebimento do timeStamp do dispositivo
 bool receiveInitialTimestamp(uint64_t &timestamp){
     Serial.println("Aguardando timestamp inicial do dispositivo...");
 
@@ -141,6 +148,7 @@ bool receiveInitialTimestamp(uint64_t &timestamp){
     return true;
 }
 
+//salvando o timestamp como primeiro elemento no arquivo de medicoes
 bool saveInitialTimestamp(uint64_t timestamp) {
 
     File measurementFile = LittleFS.open(MEASUREMENT_FILE, FILE_WRITE);
@@ -167,6 +175,7 @@ bool saveInitialTimestamp(uint64_t timestamp) {
     return true;
 }
 
+//apagando o arquivo de medicoes
 void deleteMeasurementFile() {
     if (LittleFS.exists(MEASUREMENT_FILE)) {
         if (LittleFS.remove(MEASUREMENT_FILE)) {
@@ -180,6 +189,7 @@ void deleteMeasurementFile() {
 }
 
 
+//inicializacao dos sensores
 void initializeSensors() {
 
     if(!aht.begin()){
@@ -201,6 +211,8 @@ void initializeSensors() {
     }
 }
 
+
+//realizacao das medicoes
 Measurement performMeasurement(){
     Measurement measurement;
 
@@ -219,6 +231,8 @@ Measurement performMeasurement(){
     return measurement;
 }
 
+
+//salvandomedicoes no arquivo
 bool saveMeasurementToFile(Measurement measurement){
     if(!LittleFS.exists(MEASUREMENT_FILE)) {
         Serial.println("ERRO: Arquivo de medidas nao existe!");
@@ -251,6 +265,8 @@ bool saveMeasurementToFile(Measurement measurement){
     return true;
 }
 
+
+//calculo do id da medicao realizada
 uint32_t getNextMeasurementId() {
 
     File measurementFile = LittleFS.open(MEASUREMENT_FILE, FILE_READ);
@@ -291,8 +307,59 @@ uint32_t getNextMeasurementId() {
     return lastMeasurement.id + 1;
 }
 
+
+//entrando em deep sleep
 void enterDeepSleep(){
     Serial.println("Entrando em modo de baixo consumo...");
     esp_sleep_enable_timer_wakeup(SLEEP_TIME * 1000000ULL);
     esp_deep_sleep_start();
+}
+
+
+//esperando pelo handshake do dispositivo
+bool waitForHandshake(){
+    Serial.println("Aguardando handshake USB...");
+
+    unsigned long startTime = millis();
+    String message;
+
+    while(millis() - startTime < USB_HANDSHAKE_TIMEOUT){
+        while(Serial.available() > 0){
+            char receivedChar = Serial.read();
+
+            if(receivedChar == '\n'){
+                message.trim();
+
+                if(message == "HELLO"){
+                    Serial.println("READY");
+                    handshakeStabilished = true;
+
+                    Serial.println("Handshake estabelecido!");
+                    return true;
+                }
+
+                message = "";
+            }else{
+                message += receivedChar;
+            }
+        }
+        delay(100);
+    }
+
+    Serial.println("Timeout aguardando handshake.");
+    return false;
+}
+
+
+//acoes apos o estabelecimento de comunicacao
+void handleUsbCommunication(){
+    if(waitForHandshake()){
+        Serial.println("Dispositivo conectado e pronto para comunicação.");
+    }else{
+        Serial.println("Nenhum handshake recebido");
+    }
+}
+
+void handleWakeupGPIO(){
+    handleUsbCommunication();
 }
