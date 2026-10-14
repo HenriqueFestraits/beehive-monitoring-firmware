@@ -316,36 +316,33 @@ void enterDeepSleep(){
 }
 
 
-//esperando pelo handshake do dispositivo
+// Espera HELLO e responde READY. Usa o leitor comum de mensagens do protocolo.
 bool waitForHandshake(){
     Serial.println("Aguardando handshake USB...");
 
     unsigned long startTime = millis();
-    String message;
 
     while(millis() - startTime < USB_HANDSHAKE_TIMEOUT){
-        while(Serial.available() > 0){
-            char receivedChar = Serial.read();
+        String message;
+        unsigned long elapsed = millis() - startTime;
+        unsigned long remaining = USB_HANDSHAKE_TIMEOUT - elapsed;
 
-            if(receivedChar == '\n'){
-                message.trim();
-
-                if(message == "HELLO"){
-                    Serial.println("READY");
-                    handshakeStabilished = true;
-
-                    Serial.println("Handshake estabelecido!");
-                    return true;
-                }
-
-                message = "";
-            }else{
-                message += receivedChar;
-            }
+        if(!readProtocolLine(message, remaining)){
+            break; // timeout ou linha invalida/muito longa
         }
-        delay(100);
+
+        if(message == "HELLO"){
+            Serial.println("READY");
+            Serial.flush();
+            handshakeStabilished = true;
+            Serial.println("Handshake estabelecido!");
+            return true;
+        }
+
+        Serial.println("ERROR:BAD_COMMAND");
     }
 
+    handshakeStabilished = false;
     Serial.println("Timeout aguardando handshake.");
     return false;
 }
@@ -431,31 +428,6 @@ uint32_t calculateFileCrc32(File &file) {
 
     file.seek(0);
     return crc ^ 0xFFFFFFFFUL;
-}
-
-// Aguarda HELLO e responde READY. Comandos desconhecidos recebem BAD_COMMAND.
-bool waitForProtocolHandshake() {
-    unsigned long startTime = millis();
-
-    while (millis() - startTime < USB_HANDSHAKE_TIMEOUT) {
-        String message;
-        unsigned long remaining = USB_HANDSHAKE_TIMEOUT - (millis() - startTime);
-
-        if (!readProtocolLine(message, remaining)) {
-            continue;
-        }
-
-        if (message == "HELLO") {
-            Serial.println("READY");
-            handshakeStabilished = true;
-            return true;
-        }
-
-        Serial.println("ERROR:BAD_COMMAND");
-    }
-
-    handshakeStabilished = false;
-    return false;
 }
 
 // Aguarda GET_FILE depois do handshake.
@@ -596,7 +568,7 @@ bool waitForTransferConfirmation(size_t expectedSize, uint32_t expectedCrc32) {
 // Ponto de entrada do protocolo completo. Intencionalmente nao chamado por
 // setup(), loop(), normalBootSetup() ou handleWakeupGPIO() nesta etapa.
 bool runFileTransferProtocol() {
-    if (!waitForProtocolHandshake()) {
+    if (!waitForHandshake()) {
         return false;
     }
 
