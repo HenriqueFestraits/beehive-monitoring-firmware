@@ -8,6 +8,8 @@
 #define SCL_PIN 23
 #define SLEEP_TIME 10 // tempo de sono em segundos (10s para teste, 2h para produção)
 #define MEASUREMENT_FILE "/measurements.bin"
+#define TEMP_MEASUREMENT_FILE "/measurements.tmp"
+#define BACKUP_MEASUREMENT_FILE "/measurements.bak"
 #define USB_HANDSHAKE_TIMEOUT 30000
 #define PROTOCOL_LINE_TIMEOUT 30000UL
 #define PROTOCOL_MAX_LINE_LENGTH 128
@@ -430,54 +432,6 @@ bool waitForFileRequest(){
     return false;
 }
 
-/*
-bool validateTransferConfirmation(const String &message, size_t expectedSize, uint32_t expectedCrc32){
-    
-    if(message == "ERROR:CHECKSUM_MISMATCH"){
-        return false;
-    }
-
-    if(!message.startsWith("RECEIVED:")){
-        Serial.println("ERROR:BAD_COMMAND");
-        return false;
-    }
-
-    int separator = message.indexOf(':', 9);
-    if(separator < 0){
-        Serial.println("ERROR:BAD_COMMAND");
-        return false;
-    }
-
-    String sizeField = message.substring(9, separator);
-    String crcField = message.substring(separator + 1);
-    sizeField.trim();
-    crcField.trim();
-
-    if (sizeField.length() == 0 || crcField.length() == 0) {
-        Serial.println("ERROR:BAD_COMMAND");
-        return false;
-    }
-
-    char *endPointer = nullptr;
-    unsigned long receivedSize = strtoul(sizeField.c_str(), &endPointer, 10);
-    if (*endPointer != '\0' || receivedSize != expectedSize) {
-        Serial.println("ERROR:BAD_COMMAND");
-        return false;
-    }
-
-    endPointer = nullptr;
-    unsigned long receivedCrc = strtoul(crcField.c_str(), &endPointer, 16);
-    if (*endPointer != '\0' || receivedCrc != expectedCrc32) {
-        Serial.println("ERROR:BAD_COMMAND");
-        return false;
-    }
-
-    return true;
-}
-
-*/
-
-
 
 bool transmitMeasurementFile(size_t &transmittedSize, uint32_t &transmittedCrc32) {
     transmittedSize = 0;
@@ -495,7 +449,7 @@ bool transmitMeasurementFile(size_t &transmittedSize, uint32_t &transmittedCrc32
     }
 
     const size_t fileSize = measurementFile.size();
-    const uint32_t fileCrc32 = calculateFileCrc32(measurementFile);
+    const uint32_t fileCrc32 = calculatedFileCrc32(measurementFile);
 
     //O calculo do CRC percorreu o arquivo
     //Precisa voltar para o inicio do arquivo antes de iniciar a transmissao
@@ -619,6 +573,148 @@ bool runFileTransferProtocol() {
         return false;
     }
 
-    return waitForTransferConfirmation(transmittedSize, transmittedCrc32);
+    if (!waitForTransferConfirmation(transmittedSize, transmittedCrc32)) {
+        return false;
+    }
+
+    uint64_t nextTimestamp = 0;
+
+    if (!receiveNextTimestamp(nextTimestamp)) {
+        return false;
+    }
+
+    if(!replaceMeasurementFileWithTimestamp(nextTimestamp)) {
+        return false;
+    }
+
+    Serial.println("SESSION_COMPLETE");
+    Serial.flush();
+
+    return true;
+}
+
+bool receiveNextTimestamp(uint64_t &timestamp){
+    Serial.println("REQUEST_TIMESTAMP");
+    Serial.flush();
+
+    String receivedData;
+
+    if(!readProtocolLine(receivedData, PROTOCOL_LINE_TIMEOUT)){
+        Serial.println("ERROR:TIMESTAMP_TIMEOUT");
+        return false;
+    }
+
+    if(receivedData.length() == 0) {
+        Serial.println("ERROR:TIMESTAMP_EMPTY");
+        return false;
+    }
+
+    for(size_t i = 0; i < receivedData.length(); i++){
+        if(receivedData[i] < '0' || receivedData[i] > '9'){
+            Serial.println("ERROR:INVALID_TIMESTAMP");
+            return false;
+        }
+    }
+
+    char *endPointer = nullptr;
+    unsigned long long parsedTimestamp = strtoull(receivedData.c_str(), &endPointer, 10);
+
+    if(endPointer == receivedData.c_str() || *endPointer != '\0'){
+        Serial.println("ERROR:INVALID_TIMESTAMP");
+        return false;
+    }
+
+    timestamp = static_cast<uint64_t>(parsedTimestamp);
+
+    Serial.println("Timestamp recebido: " + String(timestamp));
+    return true;
+}
+
+
+bool replaceMeasurementFileWithTimestamp(uint64_t timestamp){
+    if(LittleFS.exists(TEMP_MEASUREMENT_FILE)){
+        if(!LittleFS.remove(TEMP_MEASUREMENT_FILE)){
+            Serial.println("ERROR:REMOVE_TEMP_FAILED");
+            return false;
+        }
+    }
+
+    File tempFile = LittleFS.open(TEMP_MEASUREMENT_FILE, FILE_WRITE);
+
+    if(!tempFile){
+        Serial.println("ERROR:TEMP_OPEN_FAILED");
+        return false;
+    }
+
+    size_t bytesWritten = tempFile.write((reinterpret_cast<uint8_t*>(&timestamp), sizeof(timestamp)));
+
+    tempFile.close();
+
+    if(bytesWritten != sizeof(timestamp)){
+        LittleFS.remove(TEMP_MEASUREMENT_FILE);
+        Serial.println("ERROR:TEMP_WRITE_FAILED");
+        return false;
+    }
+    
+
+    File verificationFile = LittleFS.open(TEMP_MEASUREMENT_FILE, FILE_READ);
+
+    if(!verificationFile){
+        Serial.println("ERROR:TEMP_VERIFY_OPEN_FAILED");
+        return false;
+    }
+
+    uint64_t storedTimestamp = 0;
+
+    size_t bytesRead = verificationFile.read(reinterpret_cast<uint8_t*>(&storedTimestamp), sizeof(storedTimestamp));
+
+    bool validFile = bytesRead == sizeof(storedTimestamp) && verificationFile.size() == sizeof(uint64_t) && storedTimestamp == timestamp;
+
+
+    verificationFile.close();
+
+    if(!validFile){
+        Serial.println("ERROR:TEMP_VERIFY_FAILED");
+        return false;
+    }
+
+    if(LittleFS.exists(BACKUP_MEASUREMENT_FILE)){
+        if(!LittleFS.remove(BACKUP_MEASUREMENT_FILE)){
+            Serial.println("ERROR:REMOVE_BACKUP_FAILED");
+            return false;
+        }
+    }
+
+    oldFileMoved = false;
+
+    if(LittleFS.exists(MEASUREMENT_FILE)){
+        if(!LittleFS.rename(MEASUREMENT_FILE, BACKUP_MEASUREMENT_FILE)){
+            Serial.println("ERROR:OLD_FILE_RENAME_FAILED");
+            return false;
+        }
+        oldFileMoved = true;
+    }
+
+    if(!LittleFS.rename(TEMP_MEASUREMENT_FILE, MEASUREMENT_FILE)){
+        if(oldFileMoved){
+            if(!LittleFS.rename(BACKUP_MEASUREMENT_FILE, MEASUREMENT_FILE)){
+                Serial.println("ERROR:FILE_RESTORE_FAILED");
+                return false;
+            }
+        }
+        
+        Serial.println("ERROR:NEW_FILE_RENAME_FAILED");
+        return false;
+    }
+
+    if(oldFileMoved){
+        if(!LittleFS.remove(BACKUP_MEASUREMENT_FILE)){
+            Serial.println("ERROR:BACKUP_CLEANUP_FAILED");
+            return false;
+        }
+    }
+
+    Serial.println("Novo arquivo de medicoes criado com sucesso!");
+    return true;
 }
 
