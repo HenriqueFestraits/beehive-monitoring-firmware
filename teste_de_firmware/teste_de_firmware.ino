@@ -6,6 +6,7 @@
 
 #define SDA_PIN 22
 #define SCL_PIN 23
+#define BUTTON_PIN 2
 #define SLEEP_TIME 10 // tempo de sono em segundos (10s para teste, 2h para produção)
 #define MEASUREMENT_FILE "/measurements.bin"
 #define TEMP_MEASUREMENT_FILE "/measurements.tmp"
@@ -118,11 +119,12 @@ void normalBootSetup(){
 
     if(wakeupCause == ESP_SLEEP_WAKEUP_GPIO){
         Serial.println("Wake-up causado pelo GPIO.");
+        handleWakeupGPIO();
         //fluxo de comunicação com o dispositivo
     }
     else if(wakeupCause == ESP_SLEEP_WAKEUP_TIMER){
         Serial.println("Wake-up causado pelo timer.");
-        handleWakeupGPIO();
+        
     }
     else{
         Serial.println("Wake-up causado motivo desconhecido.");
@@ -316,6 +318,13 @@ uint32_t getNextMeasurementId() {
 void enterDeepSleep(){
     Serial.println("Entrando em modo de baixo consumo...");
     esp_sleep_enable_timer_wakeup(SLEEP_TIME * 1000000ULL);
+
+    esp_err_t result = esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+
+    if(result != ESP_OK){
+        Serial.println("ERRO: Falha ao configurar wakeup por GPIO!");
+        return;
+    }
     esp_deep_sleep_start();
 }
 
@@ -646,7 +655,7 @@ bool replaceMeasurementFileWithTimestamp(uint64_t timestamp){
         return false;
     }
 
-    size_t bytesWritten = tempFile.write((reinterpret_cast<uint8_t*>(&timestamp), sizeof(timestamp)));
+    size_t bytesWritten = tempFile.write(reinterpret_cast<uint8_t*>(&timestamp), sizeof(timestamp));
 
     tempFile.close();
 
@@ -685,7 +694,7 @@ bool replaceMeasurementFileWithTimestamp(uint64_t timestamp){
         }
     }
 
-    oldFileMoved = false;
+    bool oldFileMoved = false;
 
     if(LittleFS.exists(MEASUREMENT_FILE)){
         if(!LittleFS.rename(MEASUREMENT_FILE, BACKUP_MEASUREMENT_FILE)){
