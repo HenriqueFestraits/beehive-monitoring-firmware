@@ -1,136 +1,168 @@
-# PROTOCOLO DE COMUNICAÇÃO USB SERIAL — V2
+# Protocolo de comunicação USB Serial — implementação atual
 
-## 1. Visão geral
+Este documento descreve o comportamento encontrado em `teste_de_firmware/teste_de_firmware.ino` na branch `main`. Ele documenta o que o código faz hoje, inclusive limitações conhecidas; não representa funcionalidades futuras ou comportamentos desejáveis que ainda não estejam implementados.
 
-O protocolo transfere o arquivo de medições do ESP32 para o celular e, somente após a confirmação da integridade da transferência, inicia um novo ciclo de medições com um timestamp Unix atualizado.
+## 1. Configuração e formato do arquivo
 
-A comunicação ocorre na mesma sessão USB Serial, a 115200 baud no ambiente de teste.
+- Interface: USB Serial, configurada com `Serial.begin(115200)`.
+- Final de linha: LF (`\n`). As funções de leitura removem CR e espaços nas linhas recebidas.
+- Timeout do handshake: 30.000 ms.
+- Timeout de leitura de linha do protocolo: 30.000 ms.
+- Comprimento máximo de linha do protocolo: 128 caracteres.
+- Buffer de transmissão binária: 256 bytes.
 
-O arquivo `/measurements.bin` possui o seguinte formato binário:
+O arquivo `/measurements.bin` é armazenado no LittleFS e contém:
 
-1. Timestamp inicial: `uint64_t` (8 bytes).
-2. Zero ou mais registros `Measurement` (16 bytes cada na configuração atual do firmware).
+1. Timestamp inicial em formato binário nativo `uint64_t` (8 bytes).
+2. Zero ou mais estruturas `Measurement`, gravadas diretamente da memória (16 bytes na compilação atual).
 
-O arquivo é transmitido sem conversão, exatamente como está armazenado no LittleFS.
+A estrutura atual é:
 
-## 2. Fluxo completo
+```cpp
+struct Measurement {
+    float temperature;
+    float humidity;
+    uint16_t eco2;
+    uint16_t tvoc;
+    uint32_t id;
+};
+```
 
-1. Celular envia `HELLO\n`.
-2. ESP32 responde `READY\n`.
-3. Celular envia `GET_FILE\n`.
-4. ESP32 envia `FILE_INFO:<tamanho_em_bytes>:<crc32>\n`.
-5. ESP32 transmite exatamente `<tamanho_em_bytes>` bytes binários.
-6. Celular valida o tamanho e o CRC-32 e envia `RECEIVED:<tamanho_em_bytes>:<crc32>\n`.
-7. ESP32 valida a confirmação e responde `TRANSFER_OK\n`.
-8. ESP32 solicita o novo timestamp com `REQUEST_TIMESTAMP\n`.
-9. Celular envia o novo timestamp Unix como inteiro decimal seguido de `\n`.
-10. ESP32 grava e verifica o timestamp em `/measurements.tmp`.
-11. ESP32 renomeia `/measurements.bin` para `/measurements.bak`, renomeia o temporário para `/measurements.bin` e remove o backup antigo.
-12. Se todas as operações forem concluídas, ESP32 responde `SESSION_COMPLETE\n`. A sessão lógica está concluída e o celular pode encerrar a comunicação.
+O firmware transmite o arquivo como bytes binários, sem convertê-lo para texto. O timestamp é interpretado como segundos Unix pelo aplicativo, embora o firmware armazene apenas o valor numérico recebido.
 
-O arquivo anterior não deve ser substituído antes de o celular confirmar a recepção correta do arquivo e antes de o novo timestamp ter sido gravado e verificado no arquivo temporário.
+## 2. Fluxo principal de transferência
 
-## 3. Mensagens de controle
+Quando `/measurements.bin` já existe e o firmware identifica um despertar por GPIO, `normalBootSetup()` chama `handleWakeupGPIO()`, que executa `runFileTransferProtocol()`.
 
-Todas as mensagens de controle são texto ASCII terminado em LF (\n). O receptor deve aceitar CRLF (\r\n), removendo o CR final.
+O fluxo implementado é:
 
-| Mensagem | Direção | Significado |
+1. O cliente envia `HELLO\n`.
+2. O ESP32 espera até 30 segundos por uma linha igual a `HELLO`. Linhas diferentes são ignoradas durante essa espera.
+3. Ao receber `HELLO`, o ESP32 envia `READY\n` e, em seguida, escreve a mensagem de diagnóstico `Handshake estabelecido!\n`.
+4. O cliente envia `GET_FILE\n`.
+5. O ESP32 lê uma linha e aceita somente `GET_FILE`. Se a linha for diferente, emite `ERROR:BAD_COMMAND\n` e interrompe o protocolo. Se a leitura falhar por timeout ou linha vazia, retorna falha sem necessariamente emitir uma mensagem de erro de protocolo.
+6. O ESP32 abre `/measurements.bin`, calcula o CRC-32 e retorna ao início do arquivo.
+7. O ESP32 envia `FILE_INFO:<tamanho_decimal>:<CRC32_hexadecimal_maiusculo>\n`.
+8. O ESP32 transmite exatamente o número de bytes anunciado em `FILE_INFO`.
+9. O cliente deve ler esse número exato de bytes e calcular o CRC-32. O ESP32 não envia delimitador textual depois do payload binário.
+10. O cliente confirma a recepção enviando `RECEIVED:<tamanho_decimal>:<CRC32_hexadecimal>\n`.
+11. O ESP32 valida o tamanho e o CRC recebidos. Se ambos corresponderem aos valores do arquivo transmitido, envia `TRANSFER_OK\n`.
+12. O ESP32 envia `REQUEST_TIMESTAMP\n` e aguarda uma linha com o novo timestamp.
+13. O cliente envia o timestamp como dígitos decimais, seguido de LF, sem prefixo e em segundos Unix.
+14. O ESP32 tenta substituir o arquivo de medições pelo novo arquivo que contém apenas o timestamp.
+15. Se a função de substituição retornar sucesso, o ESP32 envia `SESSION_COMPLETE\n`.
+
+O cliente só deve considerar a sessão concluída ao receber `SESSION_COMPLETE\n`.
+
+## 3. Formato das mensagens
+
+| Mensagem | Direção | Comportamento atual |
 |---|---|---|
-| `HELLO\n` | Celular → ESP32 | Inicia a sessão. |
-| `READY\n` | ESP32 → Celular | ESP32 aceita iniciar a transferência. |
-| `GET_FILE\n` | Celular → ESP32 | Solicita o arquivo de medições. |
-| `FILE_INFO:<size>:<crc32>\n` | ESP32 → Celular | Informa o tamanho exato em bytes e o CRC-32 do arquivo. |
-| `RECEIVED:<size>:<crc32>\n` | Celular → ESP32 | Confirma que recebeu todos os bytes e validou tamanho e CRC. |
-| `TRANSFER_OK\n` | ESP32 → Celular | Confirma que a mensagem RECEIVED foi validada. |
-| `REQUEST_TIMESTAMP\n` | ESP32 → Celular | Solicita um novo timestamp Unix. |
-| `<unix_seconds>\n` | Celular → ESP32 | Envia o timestamp como inteiro decimal, sem prefixo. |
-| `SESSION_COMPLETE\n` | ESP32 → Celular | Confirma que o novo arquivo foi instalado e o backup removido. |
+| `HELLO\n` | Cliente → ESP32 | Inicia a espera do handshake. |
+| `READY\n` | ESP32 → Cliente | Emitido quando o ESP32 recebe `HELLO`. |
+| `GET_FILE\n` | Cliente → ESP32 | Solicita o arquivo. |
+| `FILE_INFO:<size>:<crc32>\n` | ESP32 → Cliente | Informa tamanho decimal e CRC-32 hexadecimal com oito dígitos maiúsculos. |
+| Payload binário | ESP32 → Cliente | Exatamente `size` bytes do arquivo. |
+| `RECEIVED:<size>:<crc32>\n` | Cliente → ESP32 | Confirma tamanho e CRC calculados pelo cliente. |
+| `TRANSFER_OK\n` | ESP32 → Cliente | Emitido após validar a confirmação. |
+| `REQUEST_TIMESTAMP\n` | ESP32 → Cliente | Solicita o timestamp seguinte. |
+| `<unix_seconds>\n` | Cliente → ESP32 | Timestamp em dígitos decimais puros, sem prefixo. |
+| `SESSION_COMPLETE\n` | ESP32 → Cliente | Emitido quando a substituição do arquivo retorna sucesso. |
 
-### Formato do CRC-32
+### CRC-32
 
-- O CRC é calculado sobre todos os bytes do arquivo, do primeiro ao último.
-- Algoritmo: CRC-32/ISO-HDLC (CRC-32/IEEE).
-- Polinômio refletido: `0xEDB88320`.
-- O valor em `FILE_INFO` é enviado em hexadecimal, com oito dígitos; letras hexadecimais maiúsculas são usadas pelo firmware.
-- O celular deve enviar o CRC em hexadecimal na mensagem `RECEIVED`. O firmware compara o valor numérico, portanto letras maiúsculas ou minúsculas são aceitas.
-- O tamanho é um inteiro decimal em bytes.
+O firmware implementa CRC-32/ISO-HDLC (CRC-32/IEEE), com polinômio refletido `0xEDB88320`, inicialização e XOR final `0xFFFFFFFF`.
 
-## 4. Transmissão binária
+- O CRC cobre todos os bytes do arquivo.
+- `FILE_INFO` contém oito dígitos hexadecimais em maiúsculas.
+- Na mensagem `RECEIVED`, o CRC é interpretado como hexadecimal e comparado numericamente; maiúsculas e minúsculas são aceitas.
+- O tamanho é interpretado como número decimal.
 
-Após enviar `FILE_INFO`, o ESP32 transmite o conteúdo binário do arquivo. O celular deve ler exatamente a quantidade de bytes indicada em `FILE_INFO`; não deve procurar delimitadores de linha dentro dos dados binários.
+## 4. Recebimento do timestamp e substituição do arquivo
 
-O celular só deve enviar `RECEIVED:<size>:<crc32>\n` se recebeu exatamente o tamanho anunciado e o CRC calculado corresponder ao CRC anunciado. Se a validação falhar, pode enviar `ERROR:CHECKSUM_MISMATCH\n`; nesse caso, a transferência não será considerada concluída e o arquivo original deve permanecer no ESP32.
+Após validar `RECEIVED`, o firmware envia `REQUEST_TIMESTAMP\n`. O método `receiveNextTimestamp()`:
 
-Não se deve interpretar os bytes do arquivo como texto.
+1. Aguarda uma linha por até 30 segundos.
+2. Rejeita uma linha não vazia que contenha caracteres fora de `0` a `9`.
+3. Converte a linha com `strtoull()` para um inteiro sem sinal.
+4. Emite uma mensagem de diagnóstico `Timestamp recebido: ...\n`.
 
-## 5. Renovação do arquivo e sincronização do horário
+O firmware não verifica explicitamente o indicador de overflow de `strtoull()`; portanto, a rejeição de timestamps que excedam o intervalo de `uint64_t` não está garantida na implementação atual.
 
-A renovação ocorre somente depois de o ESP32 enviar `TRANSFER_OK\n`, na mesma sessão USB.
+Para substituir o arquivo, `replaceMeasurementFileWithTimestamp()`:
 
-1. O ESP32 envia `REQUEST_TIMESTAMP\n`.
-2. O celular envia o timestamp Unix atual como texto decimal puro, por exemplo `1792084212\n`. Não usar o prefixo `TIMESTAMP:` e não enviar milissegundos.
-3. O ESP32 verifica que a linha contém somente dígitos decimais e converte o valor para `uint64_t`.
-4. O ESP32 grava os 8 bytes do timestamp em `/measurements.tmp`.
-5. O ESP32 reabre o temporário e verifica tamanho e valor gravado.
-6. Se existir um backup antigo `/measurements.bak`, o ESP32 tenta removê-lo.
-7. Se existir `/measurements.bin`, o ESP32 renomeia o arquivo para `/measurements.bak`.
-8. O ESP32 renomeia `/measurements.tmp` para `/measurements.bin`.
-9. Se essa renomeação falhar depois de mover o arquivo antigo, o firmware tenta restaurar o backup para `/measurements.bin`.
-10. Depois de instalar o novo arquivo, o ESP32 remove `/measurements.bak`.
-11. O ESP32 envia `SESSION_COMPLETE\n` somente se a função de substituição retornar sucesso.
+1. Remove um arquivo temporário antigo, se existir.
+2. Cria `/measurements.tmp` e grava os 8 bytes do timestamp.
+3. Reabre o temporário e verifica seu tamanho e o valor gravado.
+4. Remove `/measurements.bak` antigo, se existir.
+5. Renomeia `/measurements.bin` para `/measurements.bak`, caso o arquivo principal exista.
+6. Renomeia `/measurements.tmp` para `/measurements.bin`.
+7. Se a promoção do temporário falhar após mover o arquivo antigo, tenta restaurar o backup.
+8. Se a promoção funcionar, remove o backup antigo.
+9. Retorna sucesso somente se todas as operações necessárias, incluindo a remoção do backup, forem concluídas. Só então o fluxo envia `SESSION_COMPLETE\n`.
 
-O novo `/measurements.bin` deve conter exatamente 8 bytes no início do novo ciclo: o timestamp binário `uint64_t`. As medições seguintes serão anexadas após esses 8 bytes.
+Se a remoção do backup falhar depois que o novo arquivo já foi instalado, a função retorna falha e o firmware não envia `SESSION_COMPLETE`, embora o novo arquivo já possa estar em `/measurements.bin`.
 
-O timestamp deve ser um inteiro decimal em **segundos** desde 1º de janeiro de 1970 (Unix time), em UTC. Não enviar milissegundos nem caracteres adicionais.
+O novo arquivo principal contém inicialmente apenas o timestamp de 8 bytes. As medições seguintes são anexadas a esse arquivo.
 
-## 6. Erros
+## 5. Erros e falhas observados no código
 
-O firmware pode emitir as seguintes mensagens de erro. O celular não deve interpretar nenhuma delas como sucesso.
+As mensagens abaixo são as mensagens explícitas encontradas na implementação. Nem todo caminho de falha produz uma mensagem de erro; em alguns casos o cliente apenas deixa de receber a resposta esperada.
 
-| Mensagem | Significado |
-|---|---|
-| `ERROR:BAD_COMMAND\n` | Comando inesperado ou linha de protocolo inválida. |
-| `ERROR:NO_FILE\n` | O arquivo de medições não existe. |
-| `ERROR:FILE_OPEN_FAILED\n` | Não foi possível abrir o arquivo para leitura. |
-| `ERROR:FILE_SEEK_FAILED\n` | Não foi possível reposicionar o arquivo para iniciar a transmissão. |
-| `ERROR:SIZE_MISMATCH\n` | O tamanho informado pelo celular não corresponde ao esperado. |
-| `ERROR:BAD_CONFIRMATION\n` | Confirmação ausente ou malformada, ou CRC inválido. |
-| `ERROR:CHECKSUM_MISMATCH\n` | O celular informa que o CRC recebido não corresponde. |
-| `ERROR:TIMESTAMP_TIMEOUT\n` | O celular não enviou uma linha de timestamp dentro do timeout. |
-| `ERROR:TIMESTAMP_EMPTY\n` | A linha do timestamp está vazia. |
-| `ERROR:INVALID_TIMESTAMP\n` | O timestamp contém caracteres que não são dígitos ou não pôde ser convertido. |
-| `ERROR:REMOVE_TEMP_FAILED\n` | Não foi possível remover um temporário anterior. |
-| `ERROR:TEMP_OPEN_FAILED\n` | Não foi possível abrir o arquivo temporário. |
-| `ERROR:TEMP_WRITE_FAILED\n` | Não foi possível gravar todos os bytes do timestamp. |
-| `ERROR:TEMP_VERIFY_OPEN_FAILED\n` | Não foi possível reabrir o temporário para verificação. |
-| `ERROR:TEMP_VERIFY_FAILED\n` | O tamanho ou o valor gravado no temporário não corresponde ao esperado. |
-| `ERROR:REMOVE_BACKUP_FAILED\n` | Não foi possível remover um backup anterior. |
-| `ERROR:OLD_FILE_RENAME_FAILED\n` | Não foi possível renomear o arquivo atual para backup. |
-| `ERROR:NEW_FILE_RENAME_FAILED\n` | Não foi possível promover o temporário para o nome definitivo. |
-| `ERROR:FILE_RESTORE_FAILED\n` | A tentativa de restaurar o arquivo antigo falhou. |
-| `ERROR:BACKUP_CLEANUP_FAILED\n` | O novo arquivo foi instalado, mas não foi possível remover o backup. |
+| Mensagem | Direção | Quando ocorre |
+|---|---|---|
+| `ERROR:BAD_COMMAND\n` | ESP32 → Cliente | Linha acima do limite em `readProtocolLine()` ou comando inesperado em `waitForFileRequest()`. |
+| `ERROR:NO_FILE\n` | ESP32 → Cliente | `/measurements.bin` não existe ao iniciar a transmissão. |
+| `ERROR:FILE_OPEN_FAILED\n` | ESP32 → Cliente | Não foi possível abrir o arquivo para leitura. |
+| `ERROR:FILE_SEEK_FAILED\n` | ESP32 → Cliente | Não foi possível reposicionar o arquivo antes da transmissão. |
+| `ERROR:SIZE_MISMATCH\n` | ESP32 → Cliente | O tamanho informado em `RECEIVED` difere do tamanho esperado ou não foi convertido integralmente. |
+| `ERROR:BAD_CONFIRMATION\n` | ESP32 → Cliente | A mensagem `RECEIVED` está malformada ou o CRC não corresponde. |
+| `ERROR:CHECKSUM_MISMATCH\n` | Cliente → ESP32 | O cliente pode enviar essa mensagem se detectar divergência de CRC. O firmware reconhece essa mensagem e aborta a transferência; ele não a emite nesse caminho. |
+| `ERROR:TIMESTAMP_TIMEOUT\n` | ESP32 → Cliente | A leitura do timestamp retorna falha, incluindo timeout ou linha vazia. |
+| `ERROR:INVALID_TIMESTAMP\n` | ESP32 → Cliente | O timestamp contém caracteres não decimais ou a conversão não consome a linha inteira. |
+| `ERROR:REMOVE_TEMP_FAILED\n` | ESP32 → Cliente | Não foi possível remover um temporário antigo. |
+| `ERROR:TEMP_OPEN_FAILED\n` | ESP32 → Cliente | Não foi possível abrir o temporário para escrita. |
+| `ERROR:TEMP_WRITE_FAILED\n` | ESP32 → Cliente | A gravação do timestamp não escreveu os 8 bytes esperados. |
+| `ERROR:TEMP_VERIFY_OPEN_FAILED\n` | ESP32 → Cliente | Não foi possível reabrir o temporário para verificação. |
+| `ERROR:TEMP_VERIFY_FAILED\n` | ESP32 → Cliente | O tamanho ou valor do timestamp gravado não corresponde ao esperado. |
+| `ERROR:REMOVE_BACKUP_FAILED\n` | ESP32 → Cliente | Não foi possível remover um backup antigo. |
+| `ERROR:OLD_FILE_RENAME_FAILED\n` | ESP32 → Cliente | Não foi possível renomear o arquivo principal para backup. |
+| `ERROR:NEW_FILE_RENAME_FAILED\n` | ESP32 → Cliente | Não foi possível renomear o temporário para o arquivo principal. |
+| `ERROR:FILE_RESTORE_FAILED\n` | ESP32 → Cliente | A tentativa de restaurar o backup falhou. |
+| `ERROR:BACKUP_CLEANUP_FAILED\n` | ESP32 → Cliente | O novo arquivo foi instalado, mas o backup não pôde ser removido. |
 
-O firmware também pode encerrar uma etapa com retorno de falha sem emitir uma mensagem específica em alguns caminhos. Se o celular não receber a resposta esperada dentro do timeout, deverá considerar a sessão incompleta.
+As mensagens de diagnóstico, como `Handshake estabelecido!`, `Timestamp recebido: ...`, `Transferencia de arquivo concluida com sucesso.` e mensagens de inicialização, também são escritas na mesma USB Serial. Elas não são mensagens de controle do protocolo.
 
-## 7. Timeouts e encerramento
+## 6. Inicialização e primeiro boot
 
-- Timeout do handshake no firmware: 30 segundos.
-- Timeout de leitura de linhas do protocolo: 30 segundos.
-- O celular deve usar timeouts próprios e não esperar indefinidamente.
-- Após enviar `HELLO\n`, o celular aguarda `READY\n`.
-- Após enviar `GET_FILE\n`, o celular aguarda `FILE_INFO` e então lê exatamente o tamanho anunciado.
-- Após enviar `RECEIVED`, o celular aguarda `TRANSFER_OK\n`.
-- Após receber `TRANSFER_OK\n`, o celular aguarda `REQUEST_TIMESTAMP\n` e então envia o timestamp.
-- A sessão só deve ser considerada concluída após `SESSION_COMPLETE\n`.
-- Em caso de erro ou timeout, o celular não deve informar que a sessão foi concluída.
+O comportamento depende da existência de `/measurements.bin`:
 
-## 8. Regras de implementação e observações
+- **Arquivo existente:** o firmware consulta `esp_sleep_get_wakeup_cause()`. Se a causa for `ESP_SLEEP_WAKEUP_GPIO`, chama o protocolo de transferência. Se for `ESP_SLEEP_WAKEUP_TIMER`, apenas registra a causa e segue para a inicialização dos sensores e o ciclo de medição.
+- **Arquivo inexistente:** `firstBootSetup()` espera um timestamp inicial diretamente pela serial. Esse caminho não utiliza o handshake `HELLO/READY` nem a sequência de transferência. O valor é lido até LF e convertido com `strtoull()`; a validação estrita de dígitos usada em `receiveNextTimestamp()` não é aplicada nesse caminho.
+- **Após a inicialização:** `setup()` retorna e o `loop()` executa uma medição, tenta anexá-la ao arquivo, aguarda 3 segundos e chama `enterDeepSleep()`.
 
-1. USB Serial utiliza 115200 baud no ambiente de teste.
-2. As mensagens de controle usam ASCII e terminam em LF; CRLF também deve ser aceito pelo receptor.
-3. O arquivo é transmitido em formato binário sem conversão.
-4. O ESP32 deve enviar `TRANSFER_OK` somente após validar tamanho e CRC recebidos na confirmação do celular.
-5. O arquivo antigo não deve ser apagado antes de a transferência ter sido confirmada.
-6. A troca usa `/measurements.tmp` e `/measurements.bak` para reduzir o risco de perda de dados, mas uma interrupção de energia durante operações de renomeação ainda exige recuperação de arquivos na inicialização.
-7. Mensagens de depuração não fazem parte do protocolo. Na versão atual do firmware, algumas mensagens de diagnóstico são escritas na mesma serial que o protocolo. Antes de integrar ao aplicativo, remova essas mensagens do canal de protocolo ou faça o cliente ignorá-las com segurança. Nunca escreva mensagens de depuração entre `FILE_INFO` e o fim do fluxo binário.
-8. Os nomes e os formatos documentados aqui descrevem o código atual. Mudanças no firmware e no aplicativo devem manter este documento sincronizado.
+A configuração atual de sono usa um temporizador definido por `SLEEP_TIME` e configura também o wake-up por GPIO usando `BUTTON_PIN` e `ESP_GPIO_WAKEUP_GPIO_HIGH`. A polaridade e o comportamento físico do botão dependem da ligação elétrica e devem ser verificados no hardware.
+
+## 7. Limitações importantes da implementação atual
+
+1. **Diagnósticos compartilham a serial com o protocolo.** Após `READY\n`, o firmware envia também `Handshake estabelecido!\n`. Como o cliente pode enviar `GET_FILE\n` ao receber `READY`, essa linha de diagnóstico pode ser lida por `waitForFileRequest()` antes de `GET_FILE`, provocando `ERROR:BAD_COMMAND`. Esse é um risco real de sincronização. Os diagnósticos devem ser removidos do canal de protocolo ou o código de leitura deve ser ajustado para ignorá-los com segurança.
+2. Nunca devem ser enviados textos de diagnóstico entre `FILE_INFO` e o fim do payload binário: qualquer byte extra será interpretado como conteúdo do arquivo.
+3. `readProtocolLine()` retorna falha para uma linha vazia, assim como para timeout; por isso, `receiveNextTimestamp()` atualmente reporta `ERROR:TIMESTAMP_TIMEOUT` também no caso de linha vazia, embora não exista um erro separado funcional para esse caso.
+4. A confirmação de CRC é validada, mas o código não faz uma validação estrutural do arquivo para garantir que seu tamanho seja exatamente 8 bytes mais um múltiplo de `sizeof(Measurement)`.
+5. O esquema temporário/backup reduz o risco de perda durante a substituição, mas não há uma rotina geral de recuperação de `.tmp` e `.bak` na inicialização após uma queda de energia.
+6. A sessão de protocolo é executada quando o firmware detecta o despertar por GPIO no caminho de arquivo existente. O despertar por timer não inicia a transferência.
+7. Os timeouts do cliente são responsabilidade do cliente. O firmware usa 30 segundos para o handshake e para leitura de linhas, mas o caminho de transmissão binária não implementa um timeout de protocolo separado para cada byte enviado.
+
+## 8. Parâmetros para o cliente
+
+- Abrir a porta serial a 115200 baud, 8 data bits, sem paridade e 1 stop bit.
+- Enviar as mensagens de controle terminadas em LF.
+- Não tratar o payload binário como texto.
+- Ler exatamente o tamanho indicado em `FILE_INFO`.
+- Calcular CRC-32/ISO-HDLC sobre o payload completo.
+- Enviar `RECEIVED:<size>:<CRC32>` somente depois de validar o payload.
+- Enviar o timestamp como inteiro decimal em segundos Unix, sem prefixo e terminado em LF.
+- Considerar sucesso somente após receber `SESSION_COMPLETE\n`.
+- Em caso de timeout, erro explícito ou ausência da resposta esperada, considerar a sessão incompleta.
+
+Este documento deve ser atualizado novamente quando o comportamento do firmware mudar. As limitações descritas acima refletem o código atual e não devem ser interpretadas como recomendações para o protocolo final.
