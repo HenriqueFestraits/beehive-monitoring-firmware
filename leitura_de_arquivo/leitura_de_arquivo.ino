@@ -1,7 +1,9 @@
+
 #include <LittleFS.h>
 #include <time.h>
 
 #define MEASUREMENT_FILE "/measurements.bin"
+#define MAC_SIZE 18  // 17 caracteres + '\0'
 
 struct Measurement {
     float temperature;
@@ -11,11 +13,8 @@ struct Measurement {
     uint32_t id;
 };
 
-
 void setup() {
-
     Serial.begin(115200);
-
     delay(1000);
 
     Serial.println();
@@ -23,7 +22,6 @@ void setup() {
     Serial.println("     LEITOR DE MEDICOES");
     Serial.println("================================");
 
-    // Inicializa o LittleFS
     if (!LittleFS.begin(false)) {
         Serial.println("ERRO: Falha ao iniciar LittleFS!");
         return;
@@ -34,14 +32,10 @@ void setup() {
     readMeasurementFile();
 }
 
-
 void loop() {
-
 }
 
-
 void readMeasurementFile() {
-
     if (!LittleFS.exists(MEASUREMENT_FILE)) {
         Serial.println("ERRO: Arquivo de medidas nao existe!");
         return;
@@ -61,13 +55,39 @@ void readMeasurementFile() {
     Serial.println(" bytes");
 
     // ========================================
+    // LEITURA DO MAC DA PLACA
+    // ========================================
+
+    char mac[MAC_SIZE] = {};
+
+    size_t macBytesRead = measurementFile.read(
+        reinterpret_cast<uint8_t*>(mac),
+        sizeof(mac)
+    );
+
+    if (macBytesRead != sizeof(mac) ||
+        mac[MAC_SIZE - 1] != '\0') {
+        Serial.println("ERRO: MAC incompleto ou invalido!");
+        measurementFile.close();
+        return;
+    }
+
+    Serial.println();
+    Serial.println("================================");
+    Serial.println("       IDENTIFICACAO DA PLACA");
+    Serial.println("================================");
+
+    Serial.print("MAC: ");
+    Serial.println(mac);
+
+    // ========================================
     // LEITURA DO TIMESTAMP
     // ========================================
 
-    uint64_t timestamp;
+    uint64_t timestamp = 0;
 
     size_t timestampBytesRead = measurementFile.read(
-        (uint8_t*)&timestamp,
+        reinterpret_cast<uint8_t*>(&timestamp),
         sizeof(timestamp)
     );
 
@@ -83,10 +103,9 @@ void readMeasurementFile() {
     Serial.println("================================");
 
     Serial.print("Unix: ");
-    Serial.println(timestamp);
+    Serial.println((unsigned long long)timestamp);
 
     printTimestamp(timestamp);
-
 
     // ========================================
     // LEITURA DAS MEDICOES
@@ -100,11 +119,10 @@ void readMeasurementFile() {
     uint32_t measurementCount = 0;
 
     while (measurementFile.available()) {
-
         Measurement measurement;
 
         size_t bytesRead = measurementFile.read(
-            (uint8_t*)&measurement,
+            reinterpret_cast<uint8_t*>(&measurement),
             sizeof(Measurement)
         );
 
@@ -146,6 +164,9 @@ void readMeasurementFile() {
     Serial.println("           RESUMO");
     Serial.println("================================");
 
+    Serial.print("MAC da placa: ");
+    Serial.println(mac);
+
     Serial.print("Quantidade de medicoes: ");
     Serial.println(measurementCount);
 
@@ -153,52 +174,40 @@ void readMeasurementFile() {
     Serial.println("Leitura finalizada.");
 }
 
-
 void printTimestamp(uint64_t timestamp) {
-
-    // Converte uint64_t para time_t
     time_t rawTime = (time_t)timestamp;
 
-    // Configura o fuso horario de Sao Paulo
     setenv("TZ", "BRT3", 1);
     tzset();
 
     struct tm timeInfo;
 
-    localtime_r(&rawTime, &timeInfo);
+    if (localtime_r(&rawTime, &timeInfo) == nullptr) {
+        Serial.println("ERRO: Timestamp invalido!");
+        return;
+    }
 
     Serial.print("Data/Hora: ");
 
-    if (timeInfo.tm_mday < 10) {
-        Serial.print("0");
-    }
+    if (timeInfo.tm_mday < 10) Serial.print("0");
     Serial.print(timeInfo.tm_mday);
     Serial.print("/");
 
-    if (timeInfo.tm_mon + 1 < 10) {
-        Serial.print("0");
-    }
+    if (timeInfo.tm_mon + 1 < 10) Serial.print("0");
     Serial.print(timeInfo.tm_mon + 1);
     Serial.print("/");
 
     Serial.print(timeInfo.tm_year + 1900);
-
     Serial.print(" ");
 
-    if (timeInfo.tm_hour < 10) {
-        Serial.print("0");
-    }
+    if (timeInfo.tm_hour < 10) Serial.print("0");
     Serial.print(timeInfo.tm_hour);
     Serial.print(":");
 
-    if (timeInfo.tm_min < 10) {
-        Serial.print("0");
-    }
+    if (timeInfo.tm_min < 10) Serial.print("0");
     Serial.print(timeInfo.tm_min);
     Serial.print(":");
 
-    if (timeInfo.tm_sec < 10) {
-        Serial.print("0");
-    }
+    if (timeInfo.tm_sec < 10) Serial.print("0");
     Serial.println(timeInfo.tm_sec);
 }
