@@ -4,9 +4,9 @@
 #include <esp_sleep.h>
 #include <LittleFS.h>
 
-#define SDA_PIN 22
-#define SCL_PIN 23
-#define BUTTON_PIN 2
+#define SDA_PIN 22   // XIAO ESP32-C6 D4 / GPIO22
+#define SCL_PIN 23   // XIAO ESP32-C6 D5 / GPIO23
+#define BUTTON_PIN 0 // XIAO ESP32-C6 D0 / GPIO0
 #define SLEEP_TIME 10 // tempo de sono em segundos (10s para teste, 2h para produção)
 #define MEASUREMENT_FILE "/measurements.bin"
 #define TEMP_MEASUREMENT_FILE "/measurements.tmp"
@@ -53,6 +53,8 @@ void loop() {
 //inicializa o sistema toda vez que o esp32 é bootado
 void initializeSystem() {
     Serial.begin(115200);
+    // A PCB usa pull-down: botao solto em LOW e pressionado em HIGH.
+    pinMode(BUTTON_PIN, INPUT_PULLDOWN);
     Wire.begin(SDA_PIN, SCL_PIN);
 
     initializeFS();
@@ -322,8 +324,8 @@ void enterDeepSleep(){
     esp_err_t result = esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
 
     if(result != ESP_OK){
-        Serial.println("ERRO: Falha ao configurar wakeup por GPIO!");
-        return;
+        // Mantem o ciclo por temporizador, mesmo se GPIO wakeup falhar.
+        Serial.println("ERRO: Falha ao configurar wakeup por GPIO; usando somente o timer.");
     }
     esp_deep_sleep_start();
 }
@@ -345,7 +347,7 @@ bool waitForHandshake(){
                 if(message == "HELLO"){
                     Serial.println("READY");
 
-                    Serial.println("Handshake estabelecido!");
+                    Serial.flush();
                     return true;
                 }
 
