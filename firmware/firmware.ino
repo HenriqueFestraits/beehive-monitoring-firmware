@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <esp_sleep.h>
 #include <LittleFS.h>
+#include <WiFi.h>
 
 #define SDA_PIN 22   // XIAO ESP32-C6 D4 / GPIO22
 #define SCL_PIN 23   // XIAO ESP32-C6 D5 / GPIO23
@@ -149,6 +150,21 @@ bool saveInitialTimestamp(uint64_t timestamp) {
 
     if (!measurementFile) {
         Serial.println("ERRO: nao foi possivel abrir o arquivo de medidas!");
+        return false;
+    }
+
+    String mac = WiFi.macAddress();
+
+    size_t macSize = mac.length() + 1;
+
+    size_t macBytesWritten = measurementFile.write(
+        (const uint8_t*)mac.c_str(),
+        macSize
+    );
+
+    if(macBytesWritten != macSize) {
+        Serial.println("ERRO: nao foi possivel gravar o MAC completo!");
+        measurementFile.close();
         return false;
     }
 
@@ -615,9 +631,10 @@ bool receiveNextTimestamp(uint64_t &timestamp){
 }
 
 
-bool replaceMeasurementFileWithTimestamp(uint64_t timestamp){
-    if(LittleFS.exists(TEMP_MEASUREMENT_FILE)){
-        if(!LittleFS.remove(TEMP_MEASUREMENT_FILE)){
+
+bool replaceMeasurementFileWithTimestamp(uint64_t timestamp) {
+    if (LittleFS.exists(TEMP_MEASUREMENT_FILE)) {
+        if (!LittleFS.remove(TEMP_MEASUREMENT_FILE)) {
             Serial.println("ERROR:REMOVE_TEMP_FAILED");
             return false;
         }
@@ -625,78 +642,136 @@ bool replaceMeasurementFileWithTimestamp(uint64_t timestamp){
 
     File tempFile = LittleFS.open(TEMP_MEASUREMENT_FILE, FILE_WRITE);
 
-    if(!tempFile){
+    if (!tempFile) {
         Serial.println("ERROR:TEMP_OPEN_FAILED");
         return false;
     }
 
-    size_t bytesWritten = tempFile.write(reinterpret_cast<uint8_t*>(&timestamp), sizeof(timestamp));
+    // 1. Obtem o MAC da placa
+    String mac = WiFi.macAddress();
+    size_t macSize = mac.length() + 1; // Inclui o '\0'
+
+    // 2. Grava o MAC no inicio do arquivo
+    size_t macBytesWritten = tempFile.write(
+        reinterpret_cast<const uint8_t*>(mac.c_str()),
+        macSize
+    );
+
+    if (macBytesWritten != macSize) {
+        tempFile.close();
+        LittleFS.remove(TEMP_MEASUREMENT_FILE);
+        Serial.println("ERROR:TEMP_MAC_WRITE_FAILED");
+        return false;
+    }
+
+    // 3. Grava o novo timestamp depois do MAC
+    size_t timestampBytesWritten = tempFile.write(
+        reinterpret_cast<const uint8_t*>(&timestamp),
+        sizeof(timestamp)
+    );
 
     tempFile.close();
 
-    if(bytesWritten != sizeof(timestamp)){
+    if (timestampBytesWritten != sizeof(timestamp)) {
         LittleFS.remove(TEMP_MEASUREMENT_FILE);
         Serial.println("ERROR:TEMP_WRITE_FAILED");
         return false;
     }
-    
 
-    File verificationFile = LittleFS.open(TEMP_MEASUREMENT_FILE, FILE_READ);
+    // 4. Reabre o arquivo para verificar o conteudo
+    File verificationFile = LittleFS.open(
+        TEMP_MEASUREMENT_FILE,
+        FILE_READ
+    );
 
-    if(!verificationFile){
+    if (!verificationFile) {
         Serial.println("ERROR:TEMP_VERIFY_OPEN_FAILED");
         return false;
     }
 
+    char storedMac[18] = {};
     uint64_t storedTimestamp = 0;
 
-    size_t bytesRead = verificationFile.read(reinterpret_cast<uint8_t*>(&storedTimestamp), sizeof(storedTimestamp));
+    size_t macBytesRead = verificationFile.read(
+        reinterpret_cast<uint8_t*>(storedMac),
+        sizeof(storedMac)
+    );
 
-    bool validFile = bytesRead == sizeof(storedTimestamp) && verificationFile.size() == sizeof(uint64_t) && storedTimestamp == timestamp;
+    size_t timestampBytesRead = 0;
 
+    if (macBytesRead == sizeof(storedMac)) {
+        timestampBytesRead = verificationFile.read(
+            reinterpret_cast<uint8_t*>(&storedTimestamp),
+            sizeof(storedTimestamp)
+        );
+    }
+
+    size_t expectedSize = sizeof(storedMac) + sizeof(uint64_t);
+
+    bool validFile =
+        macBytesRead == sizeof(storedMac) &&
+        timestampBytesRead == sizeof(storedTimestamp) &&
+        verificationFile.size() == expectedSize &&
+        storedMac[sizeof(storedMac) - 1] == '\0' &&
+        mac == String(storedMac) &&
+        storedTimestamp == timestamp;
 
     verificationFile.close();
 
-    if(!validFile){
+    if (!validFile) {
+        LittleFS.remove(TEMP_MEASUREMENT_FILE);
         Serial.println("ERROR:TEMP_VERIFY_FAILED");
         return false;
     }
 
-    if(LittleFS.exists(BACKUP_MEASUREMENT_FILE)){
-        if(!LittleFS.remove(BACKUP_MEASUREMENT_FILE)){
+    // 5. Remove o backup anterior, se existir
+    if (LittleFS.exists(BACKUP_MEASUREMENT_FILE)) {
+        if (!LittleFS.remove(BACKUP_MEASUREMENT_FILE)) {
             Serial.println("ERROR:REMOVE_BACKUP_FAILED");
             return false;
         }
     }
 
+    // 6. Renomeia o arquivo atual para backup
     bool oldFileMoved = false;
 
-    if(LittleFS.exists(MEASUREMENT_FILE)){
-        if(!LittleFS.rename(MEASUREMENT_FILE, BACKUP_MEASUREMENT_FILE)){
+    if (LittleFS.exists(MEASUREMENT_FILE)) {
+        if (!LittleFS.rename(
+                MEASUREMENT_FILE,
+                BACKUP_MEASUREMENT_FILE)) {
             Serial.println("ERROR:OLD_FILE_RENAME_FAILED");
             return false;
         }
+
         oldFileMoved = true;
     }
 
-    if(!LittleFS.rename(TEMP_MEASUREMENT_FILE, MEASUREMENT_FILE)){
-        if(oldFileMoved){
-            if(!LittleFS.rename(BACKUP_MEASUREMENT_FILE, MEASUREMENT_FILE)){
+    // 7. Coloca o novo arquivo no lugar do atual
+    if (!LittleFS.rename(
+            TEMP_MEASUREMENT_FILE,
+            MEASUREMENT_FILE)) {
+
+        if (oldFileMoved) {
+            if (!LittleFS.rename(
+                    BACKUP_MEASUREMENT_FILE,
+                    MEASUREMENT_FILE)) {
                 Serial.println("ERROR:FILE_RESTORE_FAILED");
                 return false;
             }
         }
-        
+
         Serial.println("ERROR:NEW_FILE_RENAME_FAILED");
         return false;
     }
 
-    if(oldFileMoved){
-        if(!LittleFS.remove(BACKUP_MEASUREMENT_FILE)){
+    // 8. Remove o backup depois da substituicao bem-sucedida
+    if (oldFileMoved) {
+        if (!LittleFS.remove(BACKUP_MEASUREMENT_FILE)) {
             Serial.println("ERROR:BACKUP_CLEANUP_FAILED");
             return false;
         }
     }
     return true;
 }
+
 
