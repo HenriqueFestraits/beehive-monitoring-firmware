@@ -4,6 +4,7 @@
 #include <esp_sleep.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <esp_mac.h>
 
 #define SDA_PIN 22   // XIAO ESP32-C6 D4 / GPIO22
 #define SCL_PIN 23   // XIAO ESP32-C6 D5 / GPIO23
@@ -31,6 +32,36 @@ ScioSense_ENS160 ens160(ENS160_I2CADDR_0);
 
 
 
+
+// Le o MAC da interface Wi-Fi sem precisar conectar a uma rede.
+bool getBoardMacAddress(String &mac) {
+    uint8_t macBytes[6] = {};
+
+    if (esp_read_mac(macBytes, ESP_MAC_WIFI_STA) != ESP_OK) {
+        return false;
+    }
+
+    bool allZero = true;
+    for (uint8_t byte : macBytes) {
+        if (byte != 0) {
+            allZero = false;
+            break;
+        }
+    }
+
+    if (allZero) {
+        return false;
+    }
+
+    char formattedMac[18];
+    snprintf(formattedMac, sizeof(formattedMac),
+             "%02X:%02X:%02X:%02X:%02X:%02X",
+             macBytes[0], macBytes[1], macBytes[2],
+             macBytes[3], macBytes[4], macBytes[5]);
+
+    mac = formattedMac;
+    return true;
+}
 
 void setup() {
     initializeSystem();
@@ -169,7 +200,12 @@ bool saveInitialTimestamp(uint64_t timestamp) {
     }
 
     // 1. Obtem o endereco MAC da placa
-    String mac = WiFi.macAddress();
+    String mac;
+    if (!getBoardMacAddress(mac)) {
+        Serial.println("ERROR:MAC_READ_FAILED");
+        measurementFile.close();
+        return false;
+    }
 
     // 2. Grava o MAC no inicio do arquivo, incluindo o '\0'
     size_t macSize = mac.length() + 1;
@@ -682,7 +718,13 @@ bool replaceMeasurementFileWithTimestamp(uint64_t timestamp) {
     }
 
     // 1. Obtem o MAC da placa
-    String mac = WiFi.macAddress();
+    String mac;
+    if (!getBoardMacAddress(mac)) {
+        Serial.println("ERROR:MAC_READ_FAILED");
+        tempFile.close();
+        LittleFS.remove(TEMP_MEASUREMENT_FILE);
+        return false;
+    }
     size_t macSize = mac.length() + 1; // Inclui o '\0'
 
     // 2. Grava o MAC no inicio do arquivo
