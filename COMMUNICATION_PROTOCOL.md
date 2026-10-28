@@ -132,7 +132,7 @@ As mensagens abaixo são as mensagens explícitas relacionadas ao protocolo enco
 | `ERROR:INVALID_TIMESTAMP\n` | ESP32 → Cliente | Timestamp contém caracteres não decimais ou a conversão não consome toda a linha. |
 | `ERROR:REMOVE_TEMP_FAILED\n` | ESP32 → Cliente | Não foi possível remover um arquivo temporário antigo. |
 | `ERROR:TEMP_OPEN_FAILED\n` | ESP32 → Cliente | Não foi possível abrir `/measurements.tmp` para escrita. |
-| `ERROR:TEMP_MAC_WRITE_FAILED\n` | ESP32 → Cliente | A gravação do MAC no temporário não escreveu todos os bytes esperados. **Novo erro relacionado ao cabeçalho com MAC.** |
+| `ERROR:MAC_READ_FAILED\\n` | ESP32 → Cliente | A leitura do MAC falhou ou retornou um endereço totalmente zerado; a criação/substituição do arquivo é abortada. |\n| `ERROR:TEMP_MAC_WRITE_FAILED\n` | ESP32 → Cliente | A gravação do MAC no temporário não escreveu todos os bytes esperados. **Novo erro relacionado ao cabeçalho com MAC.** |
 | `ERROR:TEMP_WRITE_FAILED\n` | ESP32 → Cliente | A gravação do timestamp no temporário não escreveu os 8 bytes esperados. |
 | `ERROR:TEMP_VERIFY_OPEN_FAILED\n` | ESP32 → Cliente | Não foi possível reabrir o temporário para verificação. |
 | `ERROR:TEMP_VERIFY_FAILED\n` | ESP32 → Cliente | O MAC, terminador nulo, timestamp ou tamanho do temporário não corresponde ao esperado. |
