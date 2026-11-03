@@ -28,7 +28,7 @@ struct Measurement {
 };
 
 Adafruit_AHTX0 aht;
-ScioSense_ENS160 ens160(ENS160_I2CADDR_0);
+ScioSense_ENS160 ens160(ENS160_I2CADDR_1);
 
 
 
@@ -88,8 +88,6 @@ void initializeSystem() {
     Wire.begin(SDA_PIN, SCL_PIN);
 
     initializeFS();
-
-    //deleteMeasurementFile(); // Apaga o arquivo de medidas para teste(remover no programa final)
 
     //verificação para o primeiro boot
     if(measurementFileExists()) {
@@ -222,33 +220,25 @@ bool saveInitialTimestamp(uint64_t timestamp) {
 }
 
 //apagando o arquivo de medicoes
-void deleteMeasurementFile() {
-    if (LittleFS.exists(MEASUREMENT_FILE)) {
-        if (LittleFS.remove(MEASUREMENT_FILE)) {
-        } else {
-            Serial.println("ERRO: Nao foi possivel apagar o arquivo!");
-        }
-    } else {
-        Serial.println("Arquivo de medidas nao existe.");
-    }
-}
 
 
 //inicializacao dos sensores
 void initializeSensors() {
 
-    if(!aht.begin()){
+    Wire.setClock(100000);
+
+    if(!aht.begin(&Wire)){
         Serial.println("ERRO: AHT21 nao encontrado!");
         while(1) delay(100);
     }
 
-    if(ens160.begin() != 0){
+    if(!ens160.begin()){
         Serial.println("Erro: ENS160 nao encontrado!");
         while(1) delay(100);
     }
 
-    if(ens160.setMode(ENS160_OPMODE_STD) != 0){
-      Serial.println("ERRO em configurar ENS160 em modo padrao!");
+    if(!ens160.setMode(ENS160_OPMODE_STD)){
+        Serial.println("ERRO em configurar ENS160 em modo padrao!");
     }
 }
 
@@ -316,7 +306,7 @@ uint32_t getNextMeasurementId() {
     size_t fileSize = measurementFile.size();
 
     // Arquivo possui apenas o timestamp inicial
-    if (fileSize == sizeof(uint64_t)) {
+    if (fileSize == 18 + sizeof(uint64_t)) {
         measurementFile.close();
         return 0;
     }
